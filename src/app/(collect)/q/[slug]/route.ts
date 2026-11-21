@@ -1,0 +1,69 @@
+export const dynamic = 'force-dynamic';
+
+import { NextResponse } from 'next/server';
+import { POST } from '@/app/api/send/route';
+import type { Link } from '@/generated/prisma/client';
+import redis from '@/lib/redis';
+import { notFound } from '@/lib/response';
+import { isValidUrl } from '@/lib/url';
+import { findLink } from '@/queries/prisma';
+
+export async function GET(request: Request, { params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+
+  let link: Link;
+
+  if (redis.enabled) {
+    link = await redis.client.fetch(
+      `link:${slug}`,
+      async () => {
+        return findLink({
+          where: {
+            slug,
+            deletedAt: null,
+          },
+        });
+      },
+      86400,
+    );
+
+    if (!link) {
+      return notFound();
+    }
+  } else {
+    link = await findLink({
+      where: {
+        slug,
+        deletedAt: null,
+      },
+    });
+
+    if (!link) {
+      return notFound();
+    }
+  }
+
+  // Links saved before the API validated urls may be relative; don't record a click we can't redirect.
+  if (!isValidUrl(link.url)) {
+    return notFound();
+  }
+
+  const payload = {
+    type: 'event',
+    payload: {
+      link: link.id,
+      url: request.url,
+      referrer: request.headers.get('referer') || undefined,
+    },
+  };
+
+  const req = new Request(request.url, {
+    method: 'POST',
+    headers: request.headers,
+    body: JSON.stringify(payload),
+  });
+
+  await POST(req);
+
+  return NextResponse.redirect(link.url);
+}
